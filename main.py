@@ -279,7 +279,10 @@ async def handle_non_private(message: Message):
 async def main():
     """Main bot function"""
     # Start polling
+    print("Starting bot...")
     await dp.start_polling(bot)
+    print("Bot stopped.")
 
 if __name__ == '__main__':
+    print("Initializing bot...")
     asyncio.run(main())
