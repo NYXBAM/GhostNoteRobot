@@ -34,7 +34,8 @@ from aiogram.types import (
     Message, 
     CallbackQuery, 
     InlineKeyboardMarkup, 
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    InputMediaPhoto
 )
 from dotenv import load_dotenv
 
@@ -53,9 +54,7 @@ dp = Dispatcher()
 # In-memory storage for rate limiting (no persistent data)
 user_last_message: Dict[int, float] = {}
 
-# Very simple Multi-language support
-# Maybe in fututre we will use i18n library
-
+# Multi-language support
 MESSAGES = {
     'en': {
         'start': '🤐 Send me your anonymous confession.\n\nYour message will be reviewed by moderators before publication. \n\nAnd posted here: @GhostNoteAnon',
@@ -71,7 +70,7 @@ MESSAGES = {
         'mod_reject': '❌ Reject'
     },
     'uk': {
-        'start': '🤐 Надішліть мені ваше анонімне зізнання.\n\nВаше повідомлення буде переглянуто модераторами перед публікацією.\n\nТа опубліковано тут: @GhostNoteAnon',
+        'start': '🤐 Надішліть мені ваше анонімне повідомлення.\n\nВаше повідомлення буде переглянуто модераторами перед публікацією.\n\nТа опубліковано тут: @GhostNoteAnon',
         'sent_for_moderation': '✅ Ваше повідомлення надіслано на модерацію.',
         'approved': '✅ Ваше зізнання опубліковано!',
         'rejected': '❌ Ваше зізнання було відхилено модераторами.',
@@ -98,6 +97,7 @@ MESSAGES = {
     }
 }
 
+
 def get_user_language(language_code: Optional[str]) -> str:
     """Determine user language based on language_code"""
     if not language_code:
@@ -114,6 +114,20 @@ def get_user_language(language_code: Optional[str]) -> str:
 def get_message(lang: str, key: str) -> str:
     """Get localized message"""
     return MESSAGES.get(lang, MESSAGES['en']).get(key, MESSAGES['en'][key])
+
+def escape_markdown_v2(text: str) -> str:
+    """Escape special characters for MarkdownV2"""
+    # Characters that need to be escaped in MarkdownV2
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+    """Escape special characters for MarkdownV2"""
+    # Characters that need to be escaped in MarkdownV2
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 def is_suspicious_content(text: str) -> bool:
     """Check if message contains suspicious content"""
@@ -134,8 +148,6 @@ def is_suspicious_content(text: str) -> bool:
 
 def check_rate_limit(user_id: int) -> bool:
     """Check if user is rate limited (30 seconds)"""
-    # This is not good idea. 
-    # We need another approach
     current_time = time.time()
     last_message_time = user_last_message.get(user_id, 0)
     
@@ -159,15 +171,25 @@ async def start_command(message: Message):
 async def handle_confession(message: Message):
     """Handle confession messages in private chat"""
     user_id = message.from_user.id
-    text = message.text
+    text = message.text or message.caption or ""
     
-    if not text:
+    # Skip if no text and no photo
+    if not text and not message.photo:
         return
+    
+    # If only photo without text, allow it
+    if message.photo and not text:
+        text = ""
     
     lang = get_user_language(message.from_user.language_code)
     
-    # Check message length
-    if len(text) < 5 or len(text) > 1000:
+    # Check message length (only if there's text)
+    if text and (len(text) < 5 or len(text) > 1000):
+        await message.answer(get_message(lang, 'invalid_length'))
+        return
+    
+    # Allow messages with only photo (no text length requirement)
+    if not text and not message.photo:
         await message.answer(get_message(lang, 'invalid_length'))
         return
     
@@ -176,19 +198,22 @@ async def handle_confession(message: Message):
         await message.answer(get_message(lang, 'rate_limit'))
         return
     
-    # Check for suspicious content
-    if is_suspicious_content(text):
+    # Check for suspicious content (only in text)
+    if text and is_suspicious_content(text):
         return  # Silently ignore suspicious content
     
     # Send to moderation
-    await send_to_moderation(text, user_id, lang)
+    await send_to_moderation(text, user_id, lang, message.photo)
     await message.answer(get_message(lang, 'sent_for_moderation'))
 
-async def send_to_moderation(confession_text: str, user_id: int, user_lang: str):
+async def send_to_moderation(confession_text: str, user_id: int, user_lang: str, photo=None):
     """Send confession to moderation chat"""
     # Create callback data with user info (temporary, in memory only)
     callback_data_approve = f"approve_{user_id}_{user_lang}_{int(time.time())}"
     callback_data_reject = f"reject_{user_id}_{user_lang}_{int(time.time())}"
+    
+    # Create spoiler callback data
+    callback_data_spoiler = f"spoiler_{user_id}_{user_lang}_{int(time.time())}"
     
     # Moderation keyboard
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -198,6 +223,10 @@ async def send_to_moderation(confession_text: str, user_id: int, user_lang: str)
                 callback_data=callback_data_approve
             ),
             InlineKeyboardButton(
+                text="🫣 Spoiler", 
+                callback_data=callback_data_spoiler
+            ),
+            InlineKeyboardButton(
                 text="❌ Reject", 
                 callback_data=callback_data_reject
             )
@@ -205,36 +234,78 @@ async def send_to_moderation(confession_text: str, user_id: int, user_lang: str)
     ])
     
     # Format message for moderators
-    mod_message = f"📝 New confession for review:\n\n{confession_text}\n\n👤 User Language: {user_lang.upper()}"
+    if confession_text:
+        mod_message = f"📝 New confession for review:\n\n{confession_text}\n\n👤 User Language: {user_lang.upper()}"
+    else:
+        mod_message = f"📝 New confession for review:\n\n[Photo only]\n\n👤 User Language: {user_lang.upper()}"
     
     # Send to moderation chat
-    await bot.send_message(
-        chat_id=MODERATION_CHAT_ID,
-        text=mod_message,
-        reply_markup=keyboard
-    )
+    if photo:
+        # Send photo with caption
+        await bot.send_photo(
+            chat_id=MODERATION_CHAT_ID,
+            photo=photo[-1].file_id,  # Get highest resolution photo
+            caption=mod_message,
+            reply_markup=keyboard
+        )
+    else:
+        # Send text only
+        await bot.send_message(
+            chat_id=MODERATION_CHAT_ID,
+            text=mod_message,
+            reply_markup=keyboard
+        )
 
-@dp.callback_query(F.data.startswith(('approve_', 'reject_')))
+@dp.callback_query(F.data.startswith(('approve_', 'reject_', 'spoiler_')))
 async def handle_moderation(callback: CallbackQuery):
     """Handle moderation decisions"""
     data_parts = callback.data.split('_')
-    action = data_parts[0]  # approve or reject
+    action = data_parts[0]  # approve, reject, or spoiler
     user_id = int(data_parts[1])
     user_lang = data_parts[2]
     timestamp = data_parts[3]
     
-    # Extract confession text from the callback message
-    confession_text = callback.message.text
-    # Remove the moderation header to get clean confession
-    confession_lines = confession_text.split('\n')
-    clean_confession = '\n'.join(confession_lines[2:-2])  # Remove header and footer
+    # Check if message has photo
+    has_photo = callback.message.photo is not None
+    
+    if has_photo:
+        # Extract confession text from photo caption
+        confession_text = callback.message.caption or ""
+        # Remove the moderation header to get clean confession
+        if confession_text:
+            confession_lines = confession_text.split('\n')
+            clean_confession = '\n'.join(confession_lines[2:-2]) if len(confession_lines) > 4 else ""
+        else:
+            clean_confession = ""
+        
+        photo_file_id = callback.message.photo[-1].file_id
+    else:
+        # Extract confession text from the callback message
+        confession_text = callback.message.text
+        # Remove the moderation header to get clean confession
+        confession_lines = confession_text.split('\n')
+        clean_confession = '\n'.join(confession_lines[2:-2])  # Remove header and footer
+        photo_file_id = None
     
     if action == 'approve':
         # Publish to target channel
-        await bot.send_message(
-            chat_id=TARGET_CHANNEL_ID,
-            text=clean_confession
-        )
+        if has_photo:
+            if clean_confession:
+                await bot.send_photo(
+                    chat_id=TARGET_CHANNEL_ID,
+                    photo=photo_file_id,
+                    caption=clean_confession
+                )
+            else:
+                await bot.send_photo(
+                    chat_id=TARGET_CHANNEL_ID,
+                    photo=photo_file_id
+                )
+        else:
+            await bot.send_message(
+                chat_id=TARGET_CHANNEL_ID,
+                text=clean_confession
+            )
         
         # Notify user
         try:
@@ -246,10 +317,67 @@ async def handle_moderation(callback: CallbackQuery):
             pass  # User might have blocked the bot
         
         # Update moderation message
-        await callback.message.edit_text(
-            f"✅ APPROVED\n\n{confession_text}",
-            reply_markup=None
-        )
+        if has_photo:
+            await callback.message.edit_caption(
+                caption=f"✅ APPROVED\n\n{confession_text}",
+                reply_markup=None
+            )
+        else:
+            await callback.message.edit_text(
+                f"✅ APPROVED\n\n{confession_text}",
+                reply_markup=None
+            )
+    
+    elif action == 'spoiler':
+        # Publish to target channel with spoiler formatting
+        if has_photo:
+            if clean_confession:
+                # Escape markdown and add spoiler formatting
+                escaped_text = escape_markdown_v2(clean_confession)
+                spoiler_text = f"||{escaped_text}||"
+                await bot.send_photo(
+                    chat_id=TARGET_CHANNEL_ID,
+                    photo=photo_file_id,
+                    caption=spoiler_text,
+                    parse_mode="MarkdownV2",
+                    has_spoiler=True  # Make photo itself a spoiler
+                )
+            else:
+                await bot.send_photo(
+                    chat_id=TARGET_CHANNEL_ID,
+                    photo=photo_file_id,
+                    has_spoiler=True  # Make photo itself a spoiler
+                )
+        else:
+            # Escape markdown and add spoiler formatting
+            escaped_text = escape_markdown_v2(clean_confession)
+            spoiler_text = f"||{escaped_text}||"
+            await bot.send_message(
+                chat_id=TARGET_CHANNEL_ID,
+                text=spoiler_text,
+                parse_mode="MarkdownV2"
+            )
+        
+        # Notify user
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=get_message(user_lang, 'approved')
+            )
+        except:
+            pass  # User might have blocked the bot
+        
+        # Update moderation message
+        if has_photo:
+            await callback.message.edit_caption(
+                caption=f"🫣 APPROVED WITH SPOILER\n\n{confession_text}",
+                reply_markup=None
+            )
+        else:
+            await callback.message.edit_text(
+                f"🫣 APPROVED WITH SPOILER\n\n{confession_text}",
+                reply_markup=None
+            )
         
     elif action == 'reject':
         # Notify user
@@ -262,10 +390,16 @@ async def handle_moderation(callback: CallbackQuery):
             pass  # User might have blocked the bot
         
         # Update moderation message
-        await callback.message.edit_text(
-            f"❌ REJECTED\n\n{confession_text}",
-            reply_markup=None
-        )
+        if has_photo:
+            await callback.message.edit_caption(
+                caption=f"❌ REJECTED\n\n{confession_text}",
+                reply_markup=None
+            )
+        else:
+            await callback.message.edit_text(
+                f"❌ REJECTED\n\n{confession_text}",
+                reply_markup=None
+            )
     
     await callback.answer()
 
@@ -279,10 +413,7 @@ async def handle_non_private(message: Message):
 async def main():
     """Main bot function"""
     # Start polling
-    print("Starting bot...")
     await dp.start_polling(bot)
-    print("Bot stopped.")
 
 if __name__ == '__main__':
-    print("Initializing bot...")
     asyncio.run(main())
