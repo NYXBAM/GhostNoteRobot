@@ -3,7 +3,7 @@
 A lightweight, privacy-first Telegram bot that lets users send **anonymous confessions** to a public channel — with built-in **moderation**, **multi-language support**, and **anti-spam** features.
 
 ---
-U can find him: https://t.me/GhostNoteRobor
+U can find him: https://t.me/GhostNoteRobot
 
 ## ✅ Features
 
